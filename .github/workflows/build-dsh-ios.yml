@@ -18,8 +18,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 ninja + ccache
-        run: brew install ninja ccache
+      - name: 安装 ninja + ccache + dpkg
+        # dpkg 提供 dpkg-deb（打 deb 用）；macos-15-intel 镜像不再预装
+        run: brew install ninja ccache dpkg
 
       - name: 缓存 Node 源码与构建产物
         id: cache-node
