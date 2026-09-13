@@ -31,12 +31,20 @@ jobs:
           key: node-ios-build-${{ runner.arch }}-${{ hashFiles('scripts/ios/apply_patches.py', 'scripts/ios/build-*.sh', 'ios-sdk-shim/**') }}
           restore-keys: |
             node-ios-build-${{ runner.arch }}-
+          # fork 上无跨仓库缓存继承，冷编译约 3 小时；即使后续步骤超时失败，
+          # 也要把部分源码树/对象文件存入缓存，下次 ninja 从断点续编。
+          save-always: true
 
       - name: 交叉编译 Node 22 for iOS + nodejs deb
+        # dist/ 已提交对应版本的 nodejs deb 时跳过（编译约 3 小时，是唯一耗时步骤）；
+        # Node 版本/补丁变化时删掉旧 deb 或本地编译后提交新 deb 即可。
+        if: ${{ !hashFiles('dist/nodejs_22.23.2-4_iphoneos-arm64.deb') }}
         run: |
           chmod +x scripts/ios/*.sh
           ./scripts/ios/build-node-ios.sh
-        timeout-minutes: 120
+        # 冷编译在 macos-15-intel 上实测 >120 分钟（fork 无缓存时 2h 超时于
+        # [3602/4790]，约 75%）；270 分钟覆盖冷编译 + 余量。
+        timeout-minutes: 270
 
       - name: 打包 dsh-ios deb（node-pty addon + DSH 全量依赖）
         run: ./scripts/ios/build-dsh-ios.sh
