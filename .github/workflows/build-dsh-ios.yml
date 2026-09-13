@@ -51,13 +51,22 @@ jobs:
         run: ./scripts/ios/build-dsh-ios.sh
         timeout-minutes: 60
 
+      - name: 打包 dsh-ios deb（roothide：rootful 布局 + iphoneos-arm64e）
+        run: TARGET=roothide ./scripts/ios/build-dsh-ios.sh
+        timeout-minutes: 60
+
+      - name: 重打包 nodejs deb（roothide，从 rootless deb 零编译重排）
+        run: ./scripts/ios/repack-node-roothide.sh
+
       - name: 上传 deb 产物
         uses: actions/upload-artifact@v4
         with:
           name: dsh-ios-debs
           path: |
             dist/nodejs_22.23.2-4_iphoneos-arm64.deb
+            dist/nodejs_22.23.2-4_iphoneos-arm64e.deb
             dist/dsh-ios_0.1.5-rc.2-1_iphoneos-arm64.deb
+            dist/dsh-ios_0.1.5-rc.2-1_iphoneos-arm64e.deb
           if-no-files-found: error
 
       - name: 发布到 Release（仅 tag 触发时）
@@ -66,5 +75,7 @@ jobs:
         with:
           files: |
             dist/nodejs_22.23.2-4_iphoneos-arm64.deb
+            dist/nodejs_22.23.2-4_iphoneos-arm64e.deb
             dist/dsh-ios_0.1.5-rc.2-1_iphoneos-arm64.deb
+            dist/dsh-ios_0.1.5-rc.2-1_iphoneos-arm64e.deb
           generate_release_notes: true

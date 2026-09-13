@@ -8,7 +8,8 @@
 #   * package dsh-ios .deb (self-contained, no device-side npm)
 #
 # Usage: ./scripts/build-dsh-ios.sh   (requires nodejs deb built first: scripts/build-node-ios.sh)
-# Output: dist/dsh-ios_${DEB_VER}_iphoneos-arm64.deb
+#        TARGET=roothide ./scripts/build-dsh-ios.sh   (RootHide Bootstrap variant)
+# Output: dist/dsh-ios_${DEB_VER}_${DEB_ARCH}.deb   (arch: iphoneos-arm64 | iphoneos-arm64e)
 set -e
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,6 +25,15 @@ NODE_VER=22.23.2
 # drift from its version string across rebuilds.
 DSH_NPM_VER=0.1.5-rc.2
 DEB_VER="$DSH_NPM_VER-1"
+# TARGET=rootless（Dopamine 等：固定 /var/jb 前缀，架构 iphoneos-arm64，默认）
+# TARGET=roothide（RootHide Bootstrap：rootful 风格路径，dpkg 装入随机 jbroot，
+#   架构 iphoneos-arm64e；launcher 全相对路径，环境里没有 /var/jb 也能解析）
+TARGET="${TARGET:-rootless}"
+case "$TARGET" in
+  rootless) PKG_USR="var/jb/usr/local" ; DEB_ARCH="iphoneos-arm64"  ; POSTINST_P="/var/jb/usr/local" ;;
+  roothide) PKG_USR="usr/local"        ; DEB_ARCH="iphoneos-arm64e" ; POSTINST_P="/usr/local" ;;
+  *) echo "unknown TARGET: $TARGET (rootless|roothide)" >&2; exit 1 ;;
+esac
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 SHIM="$ROOT/ios-sdk-shim"
 
@@ -183,14 +193,32 @@ export default class LocalSubprocessRuntime extends SubprocessRuntime {
 }
 EOF
 
-echo "== [5/5] 打包 dsh-ios deb =="
+echo "== [5/5] 打包 dsh-ios deb（target: $TARGET）=="
 DEB=/tmp/dsh-deb
-rm -rf "$DEB" && mkdir -p "$DEB/DEBIAN" "$DEB/var/jb/usr/local/bin" "$DEB/var/jb/usr/local/lib"
-cp -a "$NM" "$DEB/var/jb/usr/local/lib/node_modules"
-ln -s ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$DEB/var/jb/usr/local/bin/dsh"
-# fetch-shim 挂到 /var/jb/usr/local/lib/，launcher 以 --require 全局加载
-cp "$ROOT/scripts/ios/fetch-shim.cjs" "$DEB/var/jb/usr/local/lib/fetch-shim.cjs"
-cat > "$DEB/var/jb/usr/local/bin/dsh-ios" <<'EOF'
+rm -rf "$DEB" && mkdir -p "$DEB/DEBIAN" "$DEB/$PKG_USR/bin" "$DEB/$PKG_USR/lib"
+cp -a "$NM" "$DEB/$PKG_USR/lib/node_modules"
+ln -s ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$DEB/$PKG_USR/bin/dsh"
+# fetch-shim 挂到 lib/，launcher 以 --require 全局加载
+cp "$ROOT/scripts/ios/fetch-shim.cjs" "$DEB/$PKG_USR/lib/fetch-shim.cjs"
+if [ "$TARGET" = roothide ]; then
+  # roothide：无固定 /var/jb（bootstrap CLI 以随机 jbroot 为默认根）。launcher
+  # 全部相对脚本目录解析，根语义（jbroot vroot 或真实路径）下都成立。
+  cat > "$DEB/$PKG_USR/bin/dsh-ios" <<'EOF'
+#!/bin/sh
+BIN="$(cd "$(dirname "$0")" && pwd)"
+export DSH_HOME="${DSH_HOME:-/var/mobile/.dsh}"
+export PATH="$BIN:$PATH"
+# --predictable --single-threaded: required on iOS. Without them the V8 W^X
+# page-flip races with JIT and crashes with SIGBUS (see docs/ios-port.md).
+# --require fetch-shim: A14 上 undici 的 wasm llhttp 会崩，全局 fetch 改走
+# node:http；WebAssembly 整体 stub（docs/ios-port.md「运行时垫片」）。
+exec "$BIN/node" --expose-internals --predictable --single-threaded \
+  --wasm-enforce-bounds-checks --wasm-max-mem-pages=16384 \
+  --wasm-max-code-space-size-mb=64 --wasm-max-committed-code-mb=32 \
+  --require "$BIN/../lib/fetch-shim.cjs" "$BIN/dsh" web "$@"
+EOF
+else
+  cat > "$DEB/$PKG_USR/bin/dsh-ios" <<'EOF'
 #!/bin/sh
 export DSH_HOME="${DSH_HOME:-/var/mobile/.dsh}"
 export PATH="/var/jb/usr/local/bin:$PATH"
@@ -203,20 +231,26 @@ exec /var/jb/usr/local/bin/node --expose-internals --predictable --single-thread
   --wasm-max-code-space-size-mb=64 --wasm-max-committed-code-mb=32 \
   --require /var/jb/usr/local/lib/fetch-shim.cjs /var/jb/usr/local/bin/dsh web "$@"
 EOF
-chmod 755 "$DEB/var/jb/usr/local/bin/dsh-ios"
+fi
+chmod 755 "$DEB/$PKG_USR/bin/dsh-ios"
+if [ "$TARGET" = roothide ]; then
+  DESC_EXTRA=" Target: RootHide Bootstrap (roothide)."
+else
+  DESC_EXTRA=""
+fi
 cat > "$DEB/DEBIAN/control" <<CTRL
 Package: dsh-ios
 Name: DeepSeek Harness for iOS
 Version: $DEB_VER
-Architecture: iphoneos-arm64
+Architecture: $DEB_ARCH
 Maintainer: dsh-ios port
 Section: Development
 Depends: nodejs (>= 22.19.0)
-Description: DeepSeek Harness (dsh) for jailbroken iOS. Bundles the full CLI with cross-compiled node-pty (real PTY), JS shims for sharp / require-builtin, inert koffi plugin stubs, and a fetch shim (node:http). Self-contained: no npm needed on the device. Launch with "dsh-ios".
+Description: DeepSeek Harness (dsh) for jailbroken iOS.$DESC_EXTRA Bundles the full CLI with cross-compiled node-pty (real PTY), JS shims for sharp / require-builtin, inert koffi plugin stubs, and a fetch shim (node:http). Self-contained: no npm needed on the device. Launch with "dsh-ios".
 CTRL
 cat > "$DEB/DEBIAN/postinst" <<'CTRL'
 #!/bin/sh
-P=/var/jb/usr/local
+P=@P@
 ENT="$P/lib/nodejs/entitlements.plist"
 REL="$P/lib/node_modules/node-pty/build/Release"
 LOG=/var/mobile/.dsh/postinst.log
@@ -237,17 +271,25 @@ else
   echo "ERROR: ldid not found - node-pty addons left UNSIGNED" >&2
   log "ERROR: ldid not found"
 fi
-# trustcache: AMFI needs the addons registered or they SIGKILL on load.
+# trustcache: AMFI 需要登记 addon，否则加载即 SIGKILL。jbctl=Dopamine；
+# trustcache=Procursus 系（roothide）。找不到只告警不失败（roothide 自身
+# 对 jbroot 内二进制有托管逻辑）。
 if command -v jbctl >/dev/null 2>&1; then
   for f in "$REL/pty.node" "$REL/spawn-helper"; do
     [ -f "$f" ] || continue
     jbctl trustcache add "$f" >>"$LOG" 2>&1 && log "trustcache add $f OK" || log "WARN: jbctl trustcache add $f failed"
   done
+elif command -v trustcache >/dev/null 2>&1; then
+  for f in "$REL/pty.node" "$REL/spawn-helper"; do
+    [ -f "$f" ] || continue
+    trustcache add "$f" >>"$LOG" 2>&1 && log "trustcache add $f OK" || log "WARN: trustcache add $f failed"
+  done
 else
-  log "WARN: jbctl not found - trustcache registration skipped"
+  log "WARN: no jbctl/trustcache found - trustcache registration skipped"
 fi
 exit 0
 CTRL
+sed -i.bak "s|@P@|$POSTINST_P|" "$DEB/DEBIAN/postinst" && rm -f "$DEB/DEBIAN/postinst.bak"
 chmod 755 "$DEB/DEBIAN/postinst"
-dpkg-deb -b --root-owner-group -Zgzip "$DEB" "$ROOT/dist/dsh-ios_${DEB_VER}_iphoneos-arm64.deb" >/dev/null
-echo "✅ $ROOT/dist/dsh-ios_${DEB_VER}_iphoneos-arm64.deb"
+dpkg-deb -b --root-owner-group -Zgzip "$DEB" "$ROOT/dist/dsh-ios_${DEB_VER}_${DEB_ARCH}.deb" >/dev/null
+echo "✅ $ROOT/dist/dsh-ios_${DEB_VER}_${DEB_ARCH}.deb"

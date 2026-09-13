@@ -14,7 +14,8 @@
 | `.github/workflows/build-dsh-ios.yml` | GitHub Actions：云端全自动交叉编译 + 打包（macOS runner + Xcode） |
 | `scripts/ios/apply_patches.py` | 源码补丁（幂等）：node / node-pty / V8 W^X |
 | `scripts/ios/build-node-ios.sh` | 编译 Node 22 → nodejs deb |
-| `scripts/ios/build-dsh-ios.sh` | 编译 node-pty addon + 打包 dsh 全量依赖 → dsh-ios deb |
+| `scripts/ios/build-dsh-ios.sh` | 编译 node-pty addon + 打包 dsh 全量依赖 → dsh-ios deb（`TARGET=roothide` 切 roothide 变体） |
+| `scripts/ios/repack-node-roothide.sh` | 把 rootless 版 nodejs deb 零编译重排为 roothide 包模型 |
 | `scripts/ios/fetch-shim.cjs` | 运行时垫片：WebAssembly stub + node:http fetch（vendor 自配方仓库，随 deb 分发） |
 | `ios-sdk-shim/mach/mach_vm.h` | iOS SDK 缺失的 mach_vm 声明（libSystem 运行时实际导出） |
 
@@ -25,8 +26,13 @@
 ## 安装（设备端，root）
 
 ```sh
+# Dopamine / rootless（iphoneos-arm64）：
 dpkg -i nodejs_22.23.2-4_iphoneos-arm64.deb dsh-ios_0.1.5-rc.2-1_iphoneos-arm64.deb
 dsh-ios    # 浏览器打开 http://127.0.0.1:3080
+
+# RootHide Bootstrap / roothide（iphoneos-arm64e）：
+dpkg -i nodejs_22.23.2-4_iphoneos-arm64e.deb dsh-ios_0.1.5-rc.2-1_iphoneos-arm64e.deb
+dsh-ios    # 同上；launcher 全相对路径，无 /var/jb 也可解析
 ```
 
 ## 关键设计决策
@@ -176,13 +182,37 @@ NODE_OPTIONS="--predictable --single-threaded \
 - [j0shua-SYSON/openclaw-ios](https://github.com/j0shua-SYSON/openclaw-ios) — **V8 W^X 补丁来源**（A9 验证，本工程适配 A14/arm64e）
 - [imcynic/nodejs-ios](https://github.com/imcynic/nodejs-ios) — V8/iOS 无 MAP_JIT 路径实测（Node 18 行为对齐；该仓库无独立 LICENSE，仅思路参考）
 
+## roothide 变体（RootHide Bootstrap）
+
+roothide 不是 rootless：它把 bootstrap 装在**随机命名的 jbroot** 里（无固定 `/var/jb`），
+deb 包模型为 [TheAppleWiki 记载](https://theapplewiki.com/wiki/Roothide) 的
+**`Architecture: iphoneos-arm64e` + rootful 风格路径**——`./usr/...` 由 roothide 的
+dpkg 在安装时迁入 jbroot。两个变体的差异只在打包层，构建产物同源：
+
+- **nodejs**：`repack-node-roothide.sh` 把 rootless deb 的 data.tar 零编译重排
+  （`./var/jb/usr/local/*` → `./usr/local/*`，架构改 `iphoneos-arm64e`），
+  postinst 签名逻辑相同，trustcache 尝试 `jbctl`（Dopamine）后尝试 `trustcache`（Procursus 系）。
+- **dsh-ios**：`build-dsh-ios.sh` 加 `TARGET=roothide`，同一套 node-pty 编译 + npm 依赖 +
+  stub/shim，仅布局与架构不同。roothide launcher **全部相对脚本目录解析**
+  （`$(dirname "$0")/node`、`../lib/fetch-shim.cjs`、`dsh` 符号链接）——bootstrap CLI 以
+  jbroot 为默认根，相对路径在任何根语义下都成立；`DSH_HOME` 默认 `/var/mobile/.dsh`
+  （roothide 下由 bootstrap 的根语义解析，dsh 会自动创建）。
+
+> ⚠️ **roothide 变体未真机验证**：V8 W^X 补丁与 entitlements 签名在 roothide 上的行为
+> 预期与 Dopamine 一致（同为 Fugu15 系），但未实测。设备装好后先跑
+> `node -e "console.log(1+1)"`（应输出 2 且无 SIGKILL），再看 `/var/mobile/.dsh/postinst.log`
+> 确认 ldid 签名与 trustcache 记录。
+
 ## 当前发布状态
 
-- 最新 deb：`dsh-ios_0.1.5-rc.2-1_iphoneos-arm64.deb`（基于 `@deepseek-ai/dsh` **0.1.5-rc.2**，
-  npm 显式 pin；**内含 koffi 插件 stub + fetch-shim**，launcher 自动 `--require fetch-shim.cjs`）
-  + `nodejs_22.23.2-4_iphoneos-arm64.deb`（V8 W^X 全 JIT + small-icu，实测 `JIT_OK` / `ICU 78.2`）。
-  安装顺序：nodejs → dsh-ios。两个 deb 提交在 `dist/`（`.gitignore` 中的 `dist/` 例外，
-  以 `git add -f` 入库）。
+- 最新 deb（两个越狱体系各一套，内容同源）：
+  **rootless（Dopamine）**：`dsh-ios_0.1.5-rc.2-1_iphoneos-arm64.deb` +
+  `nodejs_22.23.2-4_iphoneos-arm64.deb`；
+  **roothide（RootHide Bootstrap，未真机验证）**：`dsh-ios_0.1.5-rc.2-1_iphoneos-arm64e.deb` +
+  `nodejs_22.23.2-4_iphoneos-arm64e.deb`。
+  dsh-ios 基于 `@deepseek-ai/dsh` **0.1.5-rc.2**（npm 显式 pin；**内含 koffi 插件 stub +
+  fetch-shim**，launcher 自动 `--require fetch-shim.cjs`）。安装顺序：nodejs → dsh-ios。
+  四个 deb 提交在 `dist/`。
 - 仓库：`ios-port` 已合并上游 `deepseek-ai/deepseek-harness` master 至 **0.1.5-rc.2**
   （merge `fe89d19f`）；GitHub Actions（macOS runner）自动交叉编译 + 打包，产物见 workflow artifact。
 - **0.1.5 未做真机回归**：上面的真机验证记录属于 0.1.1-rc.2；0.1.5 新增依赖均为纯 JS
