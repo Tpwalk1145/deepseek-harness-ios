@@ -3,7 +3,7 @@
 # and package the nodejs .deb (rootless /var/jb layout, darwin-style JIT path).
 #
 # Usage: ./scripts/build-node-ios.sh
-# Output: dist/nodejs_22.23.2-1_iphoneos-arm64.deb
+# Output: dist/nodejs_${NODE_DEB_VER}_iphoneos-arm64.deb
 set -e
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -11,6 +11,8 @@ cd "$ROOT"
 mkdir -p dist
 
 NODE_VER=22.23.2
+# deb 包修订号：仅重打包/打包侧修复时递增（Node 版本变化时重置为 -1）。
+NODE_DEB_VER="$NODE_VER-4"
 NODE_SRC="$ROOT/node-v$NODE_VER"
 SHIM="$ROOT/ios-sdk-shim"
 
@@ -104,14 +106,14 @@ rm -rf /tmp/node-ios-staging/var/jb/usr/local/include /tmp/node-ios-staging/var/
 mkdir -p /tmp/nodejs-deb/DEBIAN /tmp/nodejs-deb/var/jb/usr/local/lib/nodejs
 cp -a /tmp/node-ios-staging/var/jb/usr/local/. /tmp/nodejs-deb/var/jb/usr/local/
 cp "$(dirname "$0")/node-jit-entitlements.plist" /tmp/nodejs-deb/var/jb/usr/local/lib/nodejs/entitlements.plist
-cat > /tmp/nodejs-deb/DEBIAN/control <<'CTRL'
+cat > /tmp/nodejs-deb/DEBIAN/control <<CTRL
 Package: nodejs
 Name: Node.js (iOS arm64)
-Version: 22.23.2-1
+Version: $NODE_DEB_VER
 Architecture: iphoneos-arm64
 Maintainer: dsh-ios port
 Section: Development
-Description: Node.js 22.23.2 cross-compiled for jailbroken iOS (rootless /var/jb layout). Darwin-style V8 JIT path (no MAP_JIT) for full JIT+WASM. Bundles npm, npx, corepack.
+Description: Node.js $NODE_VER cross-compiled for jailbroken iOS (rootless /var/jb layout). Darwin-style V8 JIT path (no MAP_JIT) for full JIT+WASM. Bundles npm, npx, corepack.
 CTRL
 cat > /tmp/nodejs-deb/DEBIAN/postinst <<'CTRL'
 #!/bin/sh
@@ -142,5 +144,5 @@ fi
 exit 0
 CTRL
 chmod 755 /tmp/nodejs-deb/DEBIAN/postinst
-dpkg-deb -b --root-owner-group -Zgzip /tmp/nodejs-deb "$ROOT/dist/nodejs_22.23.2-1_iphoneos-arm64.deb" >/dev/null
-echo "✅ $ROOT/dist/nodejs_22.23.2-1_iphoneos-arm64.deb"
+dpkg-deb -b --root-owner-group -Zgzip /tmp/nodejs-deb "$ROOT/dist/nodejs_${NODE_DEB_VER}_iphoneos-arm64.deb" >/dev/null
+echo "✅ $ROOT/dist/nodejs_${NODE_DEB_VER}_iphoneos-arm64.deb"
